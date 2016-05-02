@@ -1,0 +1,256 @@
+;;;;;;;;;;;;;;;;;;;;;;
+; Soron's Snake - v2 ;
+;;;;;;;;;;;;;;;;;;;;;;
+
+; coded by Soron of http://0x10cforum.com/, for the DCPU
+; hereby released into the public domain
+; (or use the Unlicense, CC0, etc., if your country doesn't have public domain)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Now conforms to the ABI! No longer clobbers your registers! ;
+; Just be sure to "MOV PC, exit_snake" when you want to exit  ;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; targetted for the DCPU-16 Studio assembler/emulator
+; may or may not work for other emulators, since I/O hasn't been made official
+
+; the snake is drawn on the background, and the food on the foreground
+
+; suggested tweaks:
+; adjust sleep_duration to speed up/slow down the game
+; adjust the upper nybble of food_char to change food color
+; adjust the lower byte of food_char to change food shape
+; adjust prng_dat to start with a different RNG seed
+; if you're not using a 32x16 window, adjust assorted things to not break
+; (things such as dat_width and dat_height, up_dir and down_dir, etc.)
+
+; this could also probably be made more efficient, but, uh... not a priority,
+; given that we're looping 0x1000 times just to slow things down!
+
+; directions:
+; 0x0001 = right
+; 0x0020 = down (assuming a 32 char-width screen)
+; 0xFFFF = left
+; 0xFFE0 = up
+; up/down WILL need to be changed if you use a different-width screen
+
+; how registers, etc., are used:
+; A = head position
+; B = direction
+; C = food position
+; X = position of thing to draw on screen, etc
+; Y = position of last segment touched 
+; Z = temporary data storage, for assorted calculations
+; I = for loops and other iterations
+; J = address of the stack element which stores the pos of start of tail
+; SP = address of the stack element which stores the pos of end of tail
+; O = not used. Why would you use this for Snake? What sort of madman ARE you?
+
+:snake_init
+	MOV AH, 3dh
+	MOV BX, 2
+	INT 32
+	MOV AH, 3fh
+	MOV CH, [dat_width]
+	MOV CL, [dat_height]
+	INT 32
+	MOV ES, DS
+	;conform to the ABI by not clobbering ALL the registers
+	MOV PUSH, X
+	MOV PUSH, Y
+	MOV PUSH, Z
+	MOV PUSH, I
+	MOV PUSH, J
+	; keep track of where OUR stack starts
+	MOV J, SP
+	MOV A, 0001h
+	MOV CX, A
+	; direction
+	MOV B, 0001h
+	JSR gen_food
+	; start of tail position
+	MOV PUSH, 0000h
+
+:game_loop
+	JSR sleep
+
+	;Read char here - do in loop
+	MOV AH, 1
+	INT 32
+	
+	IFE AL, [up_key]
+		MOV PC, turn_up
+	IFE AL, [down_key]
+		MOV PC, turn_down
+	IFE AL, [left_key]
+		MOV PC, turn_left
+	IFE AL, [right_key]
+		MOV PC, turn_right
+
+:move_snake
+;Fix Head position
+	MOV Y, A
+	MOV A, CX
+
+:check_collision
+	MOV X, A
+;Check Row
+	MOV Z, [dat_height]
+	HSL Z, 2
+	IFG X, Z
+		MOV PC, lose_game
+;Check Column
+	MOV Z, X
+	AND Z, FF00h
+	ADD Z, [dat_width]
+	IFG X, Z
+		MOV PC, lose_game
+	
+	MOV AH, 3fh
+	MOV BX, 2
+	INT 32
+	IFE DS, [tail_color]
+		MOV PC, lose_game
+	MOV PC, draw_snake
+	 
+:draw_snake
+;Draw head
+	MOV AH, 40h
+	MOV BX, 2
+	MOV DX, CX
+	MOV DS, [head_color]
+	INT 32
+	
+;Draw tail
+	;Draw second one near head, stored in Y
+	MOV DX, Y
+	MOV DS, [tail_color]
+	INT 32
+	;If got food, do nothing more
+	;If did not get food, undo last tail spot
+	IFE A, C
+		MOV PC, grow_tail
+	MOV DS, ES
+	MOV I, SP
+	SUB I, 1
+	MOV DX, [I]
+	INT 32
+
+:turn_left
+	IFN B, [dir_right]
+		MOV B, [dir_left]
+		IFE B, [dir_left]
+			SUB CL, 1
+	MOV PC, move_snake
+
+:turn_right
+	IFN B, [dir_left]
+		MOV B, [dir_right]
+		IFE B, [dir_right]
+			ADD CL, 1
+	MOV PC, move_snake
+
+:turn_up
+	IFN B, [dir_down]
+		MOV B, [dir_up]
+		IFE B, [dir_up]
+			ADD CH, 1
+	MOV PC, move_snake
+
+:turn_down
+	IFN B, [dir_up]
+		MOV B, [dir_down]
+		IFE B, [dir_down]
+			SUB CH, 1
+	MOV PC, move_snake
+
+:grow_tail
+	MOV PUSH, Y
+	JSR gen_food
+	MOV PC, game_loop
+
+:gen_food
+	JSR rand
+	MOV C, [prng_dat]
+	MOV Z, [dat_width]
+	MUL Z, [dat_height]
+	;MOD C, Z
+	MOV DL, C
+	MOV DH, C
+	AND DL, FFh
+	AND DH, 0000FF00h
+	HSR DH, 2
+	MOD DL, [dat_width]
+	MOD DH, [dat_height]
+	MOV DS, [food_char]
+	MOV AH, 40h
+	INT 32
+	MOV PC, POP
+	
+:lose_game
+	MOV PC, snake_init
+
+:exit_snake
+	MOV AH, 0
+	INT 32
+	MOV SP, J
+	MOV J, POP
+	MOV I, POP
+	MOV Z, POP
+	MOV Y, POP
+	MOV X, POP
+	MOV PC, POP
+
+:sleep
+	MOV I, 0
+:sleep_loop
+	ADD I, 1
+	IFG I, [sleep_duration]
+		MOV PC, POP
+	MOV PC, sleep_loop
+
+:sleep_duration
+	DAT 1000
+
+:rand
+;introduce at least a LITTLE unpredictability
+	MUL [prng_dat], A
+	ADD [prng_dat], SP
+	;now do the actual work
+	MUL [prng_dat], 31421
+	ADD [prng_dat], 6927
+	MOV PC, POP
+
+:prng_dat
+	DAT 13ADh
+
+;if you change width, you WILL need to double-check edge-of-screen collision
+:dat_width
+	DAT 31
+:dat_height
+	DAT 31
+
+:head_color
+	DAT 0000F700h
+:tail_color
+	DAT 0000E200h
+:food_char
+	DAT 40efefefh
+
+:dir_right
+	DAT 0001h
+:dir_down
+	DAT 0020h
+:dir_left
+	DAT FFFFh
+:dir_up
+	DAT FFE0h
+	
+:up_key
+	DAT 26h
+:down_key
+	DAT 28h
+:left_key
+	DAT 25h
+:right_key
+	DAT 27h
